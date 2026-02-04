@@ -1,0 +1,12 @@
+# Ignore python cache
+__pycache__/
+*.pyc
+
+# Ignore personal data
+Exported_Notes/
+Downloads/
+*.html
+*.htm
+
+# Ignore system files
+.DS_Store
