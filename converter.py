@@ -265,6 +265,13 @@ def get_code_language(el: Tag) -> str:
 # Platform names that should be stripped from raw titles
 _PLATFORM_NAME_SET = {n.lower() for n in _PLATFORM_NAMES}
 
+# Generic UI labels that look like titles but aren't
+_UI_LABEL_SET = {
+    "chats", "new chat", "recent", "recent chats", "history",
+    "conversations", "starred", "pinned", "all chats",
+    "home", "settings", "help", "feedback", "send a message",
+}
+
 
 def _clean_raw_title(raw: str) -> Optional[str]:
     """Strip platform names, separators, and prefixes from a raw title string."""
@@ -280,8 +287,9 @@ def _clean_raw_title(raw: str) -> Optional[str]:
             rf"(?i)^{re.escape(name)}\s*[-–—|:]\s*", "", cleaned
         )
     cleaned = cleaned.strip(" -–—|:")
-    # If what remains is still just a platform name, discard
-    if cleaned.lower() in _PLATFORM_NAME_SET or not cleaned:
+    # If what remains is a platform name or generic UI label, discard
+    lower = cleaned.lower()
+    if lower in _PLATFORM_NAME_SET or lower in _UI_LABEL_SET or not cleaned:
         return None
     return cleaned
 
@@ -291,12 +299,55 @@ def _extract_chat_title(soup: BeautifulSoup) -> Optional[str]:
     Extract the conversation title from the DOM **before** cleanup runs.
 
     Tries multiple strategies (most specific first):
-      1. First user message text (the actual question that started the chat)
-      2. ``<title>`` tag content (with platform-name stripping)
-      3. ``<h1>`` that is NOT a platform name
-      4. ``og:title`` / ``twitter:title`` meta tags
+      1. Active / selected chat item in the sidebar (Gemini, ChatGPT)
+      2. First user message text (data-attribute marked platforms)
+      3. ``<title>`` tag content (with platform-name stripping)
+      4. First ``<h1>`` that is NOT a platform name or UI label
+      5. ``og:title`` / ``twitter:title`` meta tags
     """
-    # ── Strategy 1: First user message ─────────────
+    # ── Strategy 1: Active sidebar chat item ───────
+    # Gemini (and others) highlight the current chat in the sidebar.
+    # We look for it BEFORE cleanup strips the sidebar away.
+    _active_selectors = [
+        {"aria-selected": "true"},
+        {"aria-current": "page"},
+        {"aria-current": "true"},
+        {"data-is-selected": "true"},
+    ]
+    _active_class_re = re.compile(
+        r"\bselected\b|\bactive\b|\bcurrent\b|\bhighlighted\b", re.IGNORECASE
+    )
+    # Check data-attribute selectors
+    for attrs in _active_selectors:
+        el = soup.find(attrs=attrs)
+        if el:
+            text = el.get_text(" ", strip=True)
+            result = _clean_raw_title(text)
+            if result:
+                logger.debug("Title from active sidebar item (attr): %s", result)
+                return result
+    # Check class-based active items inside sidebar-like containers
+    for sidebar in soup.find_all(
+        ["aside", "nav"],
+        limit=5,
+    ):
+        for item in sidebar.find_all(class_=_active_class_re, limit=5):
+            text = item.get_text(" ", strip=True)
+            result = _clean_raw_title(text)
+            if result:
+                logger.debug("Title from active sidebar item (class): %s", result)
+                return result
+    # Also scan role="complementary" / role="navigation" containers
+    for role in ("complementary", "navigation"):
+        for container in soup.find_all(attrs={"role": role}, limit=3):
+            for item in container.find_all(class_=_active_class_re, limit=5):
+                text = item.get_text(" ", strip=True)
+                result = _clean_raw_title(text)
+                if result:
+                    logger.debug("Title from active sidebar item (role): %s", result)
+                    return result
+
+    # ── Strategy 2: First user message ─────────────
     # Most platforms mark user turns with data attributes or known classes.
     for attr, val in (
         ("data-message-author-role", "user"),
@@ -313,21 +364,21 @@ def _extract_chat_title(soup: BeautifulSoup) -> Optional[str]:
             if text and text.lower() not in _PLATFORM_NAME_SET:
                 return text
 
-    # ── Strategy 2: <title> tag ────────────────────
+    # ── Strategy 3: <title> tag ────────────────────
     title_tag = soup.find("title")
     if title_tag:
         result = _clean_raw_title(title_tag.get_text(strip=True))
         if result:
             return result
 
-    # ── Strategy 3: First <h1> that isn't branding ─
+    # ── Strategy 4: First <h1> that isn't branding ─
     for h1 in soup.find_all("h1", limit=3):
         h1_text = h1.get_text(strip=True)
         result = _clean_raw_title(h1_text)
         if result:
             return result
 
-    # ── Strategy 4: Open Graph / Twitter meta ──────
+    # ── Strategy 5: Open Graph / Twitter meta ──────
     for attr_name in ("og:title", "twitter:title"):
         meta = soup.find("meta", attrs={"property": attr_name}) or soup.find(
             "meta", attrs={"name": attr_name}
