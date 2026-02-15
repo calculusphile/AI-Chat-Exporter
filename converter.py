@@ -1,160 +1,402 @@
-import os
-import datetime
-from bs4 import BeautifulSoup
-from markdownify import markdownify as md
-import re # <--- MAKE SURE TO ADD THIS IMPORT AT THE TOP OF THE FILE
+"""
+AI Chat Exporter — Converter Module.
 
-def load_html(filepath):
-    with open(filepath, "r", encoding="utf-8") as f:
-        return f.read()
-
-# --- HELPER: METADATA GENERATOR ---
-# --- IMPROVED METADATA GENERATOR ---
-def generate_frontmatter(title, content, url="Local File"):
-    date_str = datetime.date.today().strftime("%Y-%m-%d")
-    
-    # Base tag
-    tags = ["ai-chat"]
-    content_lower = content.lower()
-    
-    # 1. Stricter Python Check
-    # Only tag python if we see "def ", "import ", or "```python"
-    if "```python" in content_lower or "def " in content_lower or "import " in content_lower:
-        tags.append("python")
-
-    # 2. Stricter C++ Check
-    # Check for includes, std::, or code blocks
-    if "```cpp" in content_lower or "```c++" in content_lower or "#include" in content_lower or "std::" in content_lower:
-        tags.append("cpp")
-
-    # 3. JavaScript
-    if "```javascript" in content_lower or "```js" in content_lower or "console.log" in content_lower:
-        tags.append("javascript")
-
-    # 4. Remove duplicates just in case
-    tags = list(set(tags))
-    
-    tag_str = ", ".join(tags)
-    
-    return f"""---
-title: "{title}"
-date: {date_str}
-tags: [{tag_str}]
-source: "{url}"
----
-
+Handles HTML → Markdown conversion with:
+  - Intelligent code-language detection (12+ languages)
+  - Auto-tagging via content analysis
+  - YAML frontmatter generation for Obsidian / Notion
+  - Configurable export settings
 """
 
-# --- LANGUAGE DETECTOR ---
-# --- UPGRADED LANGUAGE DETECTOR ---
-# --- UPGRADED LANGUAGE DETECTOR (PRIORITY: LABEL > CONTENT) ---
-def get_code_language(el):
+from __future__ import annotations
+
+import datetime
+import logging
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+from bs4 import BeautifulSoup, Tag
+from markdownify import markdownify as md
+
+from config_loader import AppConfig, load_config
+
+logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────
+#  Language Detection Maps
+# ──────────────────────────────────────────────
+
+# Label → canonical language name  (used in proximity search)
+_LABEL_MAP: dict[str, str] = {
+    "c++": "cpp", "cpp": "cpp", "c plus plus": "cpp",
+    "python": "python", "py ": "python",
+    "javascript": "javascript", "js ": "javascript", "js code": "javascript",
+    "typescript": "typescript", "ts ": "typescript",
+    "java": "java",
+    "rust": "rust",
+    "go ": "go", "golang": "go",
+    "ruby": "ruby",
+    "sql": "sql",
+    "bash": "bash", "shell": "bash", "terminal": "bash",
+    "html": "html",
+    "css": "css",
+    "c#": "csharp", "csharp": "csharp",
+    "kotlin": "kotlin",
+    "swift": "swift",
+    "r ": "r", "r code": "r",
+    "php": "php",
+    "dart": "dart",
+}
+
+# Codeblock tag → canonical  (used in frontmatter auto-tagging)
+_CODE_BLOCK_TAG_MAP: dict[str, str] = {
+    "```python": "python", "```py": "python",
+    "```cpp": "cpp", "```c++": "cpp",
+    "```javascript": "javascript", "```js": "javascript",
+    "```typescript": "typescript", "```ts": "typescript",
+    "```java": "java",
+    "```rust": "rust", "```rs": "rust",
+    "```go": "go",
+    "```ruby": "ruby", "```rb": "ruby",
+    "```sql": "sql",
+    "```bash": "bash", "```sh": "bash",
+    "```html": "html",
+    "```css": "css",
+    "```csharp": "csharp", "```c#": "csharp",
+    "```kotlin": "kotlin", "```kt": "kotlin",
+    "```swift": "swift",
+    "```r": "r",
+    "```php": "php",
+    "```dart": "dart",
+}
+
+
+# ──────────────────────────────────────────────
+#  Result Data Model
+# ──────────────────────────────────────────────
+
+@dataclass
+class ExtractionResult:
+    """Holds the outcome of a single extraction attempt."""
+    success: bool
+    markdown: Optional[str] = None
+    message: str = ""
+    word_count: int = 0
+    detected_languages: List[str] = field(default_factory=list)
+
+
+# ──────────────────────────────────────────────
+#  Internal Helpers
+# ──────────────────────────────────────────────
+
+def _load_html(filepath: Path) -> str:
+    """Read an HTML file with UTF-8 encoding."""
+    return filepath.read_text(encoding="utf-8")
+
+
+def _auto_detect_tags(content: str) -> List[str]:
     """
-    1. Checks HTML classes.
-    2. Proximity Search: Finds the closest text ABOVE the block (ignoring nesting).
-    3. Syntax Analysis: Checks for C++ specific patterns in the code.
+    Scan markdown content and return a deduplicated list of language tags.
+    Uses code-block markers AND syntax heuristics.
     """
-    # 1. HTML Class Check
+    tags: set[str] = {"ai-chat"}
+    lower = content.lower()
+
+    # Code-block markers
+    for marker, lang in _CODE_BLOCK_TAG_MAP.items():
+        if marker in lower:
+            tags.add(lang)
+
+    # Syntax heuristics
+    if "def " in lower and ":" in lower:
+        tags.add("python")
+    if "#include" in lower or "std::" in lower:
+        tags.add("cpp")
+    if "console.log" in lower:
+        tags.add("javascript")
+    if "fmt.println" in lower or "func " in lower and "go" not in tags:
+        tags.add("go")
+    if "fn " in lower and "let mut" in lower:
+        tags.add("rust")
+    if "public static void main" in lower:
+        tags.add("java")
+
+    return sorted(tags)
+
+
+def generate_frontmatter(
+    title: str,
+    content: str,
+    *,
+    url: str = "Local File",
+    date_format: str = "%Y-%m-%d",
+) -> str:
+    """
+    Build YAML frontmatter block for Obsidian/Notion compatibility.
+
+    Args:
+        title: Note title.
+        content: Markdown body (used for auto-tagging).
+        url: Source URL or label.
+        date_format: strftime format string.
+
+    Returns:
+        YAML frontmatter string terminated by a blank line.
+    """
+    date_str = datetime.date.today().strftime(date_format)
+    tags = _auto_detect_tags(content)
+    tag_str = ", ".join(tags)
+
+    return (
+        f"---\n"
+        f'title: "{title}"\n'
+        f"date: {date_str}\n"
+        f"tags: [{tag_str}]\n"
+        f'source: "{url}"\n'
+        f"---\n\n"
+    )
+
+
+# ──────────────────────────────────────────────
+#  Language Detection (for <code> elements)
+# ──────────────────────────────────────────────
+
+def get_code_language(el: Tag) -> str:
+    """
+    Detect the programming language of a ``<code>``/``<pre>`` element.
+
+    Strategy (highest priority first):
+      1. HTML class inspection  (``language-*`` / ``lang-*``)
+      2. Proximity search       (closest preceding text block)
+      3. Syntax analysis        (pattern matching on code content)
+
+    Args:
+        el: A BeautifulSoup Tag representing a code element.
+
+    Returns:
+        Canonical language string, or ``""`` if undetermined.
+    """
+    # --- 1. HTML Class Inspection ---
     el_classes = el.get("class", []) or []
     parent_classes = el.parent.get("class", []) if el.parent else []
-    for c in el_classes + parent_classes:
-        if c.startswith("language-"): return c.replace("language-", "")
+    for cls in el_classes + parent_classes:
+        if cls.startswith("language-") or cls.startswith("lang-"):
+            return cls.split("-", 1)[1]
 
-    # 2. PROXIMITY CHECK (The Fix)
-    # Instead of siblings, we search the entire document backwards from this element
-    # to find the closest header or paragraph.
-    search_limit = 3  # Look at the last 3 elements found
-    found_elements = el.parent.find_all_previous(['p', 'div', 'h3', 'h4', 'li'], limit=search_limit)
-    
-    for prev in found_elements:
+    # --- 2. Proximity Search ---
+    search_limit = 4
+    preceding = el.parent.find_all_previous(
+        ["p", "div", "h3", "h4", "h5", "li", "span"], limit=search_limit
+    )
+    for prev in preceding:
         text = prev.get_text(strip=True).lower()
-        
-        # If the text is huge (like a whole paragraph), check the LAST sentence
-        if len(text) > 100:
-            text = text[-50:] # Only look at the end
-            
-        # Explicit Labels
-        if "c++" in text or "cpp" in text: return "cpp"
-        if "python" in text: return "python"
-        if "javascript" in text or "js code" in text: return "javascript"
-        if "java" in text and "script" not in text: return "java"
-        if "sql" in text: return "sql"
-        if "bash" in text: return "bash"
+        if len(text) > 120:
+            text = text[-60:]
 
-    # 3. CONTENT CHECK (Syntax Analysis)
-    code_content = el.get_text()
-    
-    # C++ Specifics
-    if "#include" in code_content or "std::" in code_content: return "cpp"
-    if "cout" in code_content and "<<" in code_content: return "cpp"
-    
-    # Regex for C-style functions: "int add(int a) {"
-    # We use re.DOTALL to handle newlines correctly
-    if re.search(r'\b(int|void|double|float|bool|char)\s+\w+\s*\(.*?\)\s*\{', code_content, re.DOTALL):
+        for label, lang in _LABEL_MAP.items():
+            if label in text:
+                # Guard "java" from matching "javascript"
+                if label == "java" and "script" in text:
+                    continue
+                return lang
+
+    # --- 3. Syntax Analysis ---
+    code = el.get_text()
+
+    # C / C++
+    if "#include" in code or "std::" in code:
         return "cpp"
-        
-    # Python Specifics
-    if "def " in code_content and ":" in code_content: return "python"
-    if "import " in code_content and "from " in code_content: return "python"
+    if "cout" in code and "<<" in code:
+        return "cpp"
+    if re.search(
+        r"\b(int|void|double|float|bool|char)\s+\w+\s*\(.*?\)\s*\{",
+        code,
+        re.DOTALL,
+    ):
+        return "cpp"
 
-    return "" # No guess
+    # Python
+    if "def " in code and ":" in code:
+        return "python"
+    if "import " in code and "from " in code:
+        return "python"
 
-# --- MAIN LOGIC ---
-def extract_response(file_path, search_phrase):
-    raw_html = load_html(file_path)
+    # Rust
+    if "fn " in code and "let " in code and "->" in code:
+        return "rust"
+
+    # Go
+    if "func " in code and "fmt." in code:
+        return "go"
+
+    # TypeScript / JavaScript
+    if "interface " in code and ":" in code and "export " in code:
+        return "typescript"
+    if "console.log" in code or "document." in code:
+        return "javascript"
+
+    # SQL
+    if re.search(r"\bSELECT\b.*\bFROM\b", code, re.IGNORECASE | re.DOTALL):
+        return "sql"
+
+    # HTML
+    if re.search(r"<\/?[a-z]+[^>]*>", code, re.IGNORECASE):
+        return "html"
+
+    return ""
+
+
+# ──────────────────────────────────────────────
+#  Core Extraction Logic
+# ──────────────────────────────────────────────
+
+def extract_response(
+    file_path: Path | str,
+    search_phrase: str,
+    *,
+    config: Optional[AppConfig] = None,
+) -> ExtractionResult:
+    """
+    Extract an AI response from an HTML chat export.
+
+    Args:
+        file_path: Path to the HTML file.
+        search_phrase: Text snippet to locate in the conversation.
+        config: Optional AppConfig (loaded from config.json if None).
+
+    Returns:
+        An ExtractionResult with markdown content and metadata.
+    """
+    cfg = config or load_config()
+    path = Path(file_path)
+
+    if not path.exists():
+        return ExtractionResult(success=False, message="File not found.")
+
+    try:
+        raw_html = _load_html(path)
+    except UnicodeDecodeError:
+        logger.error("Encoding error reading %s", path)
+        return ExtractionResult(success=False, message="Failed to read file — encoding issue.")
+
     soup = BeautifulSoup(raw_html, "html.parser")
 
-    # 1. Find User Question
-    user_msg_node = soup.find(string=lambda text: text and search_phrase.lower() in text.lower())
-    if not user_msg_node:
-        return None, "❌ Phrase not found."
+    # 1. Locate user message containing the search phrase
+    user_node = soup.find(
+        string=lambda text: text and search_phrase.lower() in text.lower()
+    )
+    if not user_node:
+        logger.warning("Phrase '%s' not found in %s", search_phrase, path.name)
+        return ExtractionResult(success=False, message="Phrase not found in the document.")
 
-    # 2. Find Container
-    container = user_msg_node.parent
-    while container.name not in ['div', 'li', 'article'] and container.parent:
+    # 2. Walk up to a meaningful container
+    container = user_node.parent
+    while container and container.name not in {"div", "li", "article", "section"}:
         container = container.parent
 
-    # 3. Find AI Response
-    ai_response_node = None
-    for sibling in container.find_all_next("div"):
-        if sibling == container: continue
-        if len(sibling.get_text(strip=True)) > 20:
-            ai_response_node = sibling
-            break
-    
-    if not ai_response_node:
-        return None, "⚠️ Found question, but couldn't isolate answer."
+    if container is None:
+        return ExtractionResult(success=False, message="Could not determine message container.")
 
-    # 4. Cleanup
-    for tag in ai_response_node(['button', 'svg', 'img']):
+    # 3. Find the AI response block
+    ai_node: Optional[Tag] = None
+    for sibling in container.find_all_next("div"):
+        if sibling == container:
+            continue
+        if len(sibling.get_text(strip=True)) > 20:
+            ai_node = sibling
+            break
+
+    if ai_node is None:
+        return ExtractionResult(
+            success=False,
+            message="Found question, but couldn't isolate the AI answer.",
+        )
+
+    # 4. Clean up non-content elements
+    removable = ["button", "svg", "img", "nav", "footer", "script", "style"]
+    if cfg.settings.strip_buttons:
+        removable.extend(["a[class*='copy']", "div[class*='toolbar']"])
+    for tag in ai_node(removable[:6]):  # BeautifulSoup tags
         tag.decompose()
 
-    # 5. Convert (RETURN RAW MARKDOWN ONLY)
-    markdown_text = md(
-        str(ai_response_node), 
-        heading_style="ATX", 
-        code_language_callback=get_code_language
+    # 5. Convert to Markdown
+    heading_style = cfg.settings.heading_style if cfg else "ATX"
+    markdown_text: str = md(
+        str(ai_node),
+        heading_style=heading_style,
+        code_language_callback=get_code_language,
     )
-    
-    # REMOVED: generate_frontmatter call here. We do it in save_to_file now.
-    return markdown_text, "✅ Success"
 
-# --- SMART SAVE FUNCTION ---
-def save_to_file(content, filename, title_for_header, mode="w"):
-    os.makedirs("Exported_Notes", exist_ok=True)
-    full_path = os.path.join("Exported_Notes", filename)
-    
-    # Check if file is new (doesn't exist) or we are overwriting
-    is_new_file = not os.path.exists(full_path) or mode == "w"
-    
-    with open(full_path, mode, encoding="utf-8") as f:
-        if is_new_file:
-            # Case 1: New File -> Add YAML Frontmatter at the very top
-            header = generate_frontmatter(title_for_header, content)
-            # Add the actual header title too
-            f.write(header + f"# {title_for_header}\n\n" + content)
+    # 6. Post-process — remove excessive blank lines
+    markdown_text = re.sub(r"\n{4,}", "\n\n\n", markdown_text)
+
+    detected = _auto_detect_tags(markdown_text)
+    detected.discard("ai-chat") if isinstance(detected, set) else None
+    word_count = len(markdown_text.split())
+
+    logger.info(
+        "Extracted %d words from '%s' (languages: %s)",
+        word_count,
+        search_phrase,
+        ", ".join(detected) or "none",
+    )
+
+    return ExtractionResult(
+        success=True,
+        markdown=markdown_text,
+        message="Extraction successful.",
+        word_count=word_count,
+        detected_languages=detected,
+    )
+
+
+# ──────────────────────────────────────────────
+#  File I/O
+# ──────────────────────────────────────────────
+
+def save_to_file(
+    content: str,
+    filename: str,
+    title_for_header: str,
+    *,
+    mode: str = "w",
+    config: Optional[AppConfig] = None,
+) -> Path:
+    """
+    Save markdown content to the export folder.
+
+    In write mode a full YAML frontmatter is prepended;
+    in append mode a horizontal rule separator is added.
+
+    Args:
+        content: Markdown body text.
+        filename: Target filename (inside save folder).
+        title_for_header: Human-readable title.
+        mode: ``'w'`` for new file, ``'a'`` for append.
+        config: Optional AppConfig.
+
+    Returns:
+        Absolute path of the saved file.
+    """
+    cfg = config or load_config()
+    folder = Path(cfg.default_save_folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    full_path = folder / filename
+
+    is_new = not full_path.exists() or mode == "w"
+
+    with full_path.open(mode, encoding="utf-8") as fh:
+        if is_new:
+            header = generate_frontmatter(
+                title_for_header,
+                content,
+                date_format=cfg.settings.date_format,
+            )
+            fh.write(header + f"# {title_for_header}\n\n" + content)
         else:
-            # Case 2: Appending -> Just add a separator and the new Question Title
-            f.write(f"\n\n---\n\n# {title_for_header}\n\n" + content)
-        
+            fh.write(f"\n\n---\n\n# {title_for_header}\n\n" + content)
+
+    logger.info("Saved → %s (%s)", full_path, "new" if is_new else "appended")
     return full_path

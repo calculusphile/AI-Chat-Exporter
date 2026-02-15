@@ -1,8 +1,14 @@
 {
     "default_save_folder": "Exported_Notes",
-    "supported_platforms": ["ChatGPT", "Gemini", "Claude"],
+    "downloads_path": "",
+    "supported_platforms": ["ChatGPT", "Gemini", "Claude", "Copilot", "DeepSeek"],
+    "version": "3.0.0",
     "settings": {
         "strip_buttons": true,
-        "include_metadata": true
+        "include_metadata": true,
+        "date_format": "%Y-%m-%d",
+        "heading_style": "ATX",
+        "wrap_code_blocks": true,
+        "max_filename_length": 50
     }
 }

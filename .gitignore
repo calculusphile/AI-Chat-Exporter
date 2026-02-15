@@ -1,12 +1,34 @@
-# Ignore python cache
+# Python bytecode & cache
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
 
-# Ignore personal data
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# IDE & editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS-specific
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Project artifacts
 Exported_Notes/
 Downloads/
 *.html
 *.htm
-
-# Ignore system files
-.DS_Store
+*.log
