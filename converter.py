@@ -259,6 +259,88 @@ def get_code_language(el: Tag) -> str:
 
 
 # ──────────────────────────────────────────────
+#  Chat Title Extraction
+# ──────────────────────────────────────────────
+
+# Platform names that should be stripped from raw titles
+_PLATFORM_NAME_SET = {n.lower() for n in _PLATFORM_NAMES}
+
+
+def _clean_raw_title(raw: str) -> Optional[str]:
+    """Strip platform names, separators, and prefixes from a raw title string."""
+    cleaned = raw.strip()
+    # Remove "Conversation with …" prefix
+    cleaned = re.sub(r"(?i)^conversation\s+with\s+", "", cleaned)
+    # Remove platform names as suffix:  "My Chat - Google Gemini"
+    for name in _PLATFORM_NAMES:
+        cleaned = re.sub(
+            rf"(?i)\s*[-–—|:]\s*{re.escape(name)}\s*$", "", cleaned
+        )
+        cleaned = re.sub(
+            rf"(?i)^{re.escape(name)}\s*[-–—|:]\s*", "", cleaned
+        )
+    cleaned = cleaned.strip(" -–—|:")
+    # If what remains is still just a platform name, discard
+    if cleaned.lower() in _PLATFORM_NAME_SET or not cleaned:
+        return None
+    return cleaned
+
+
+def _extract_chat_title(soup: BeautifulSoup) -> Optional[str]:
+    """
+    Extract the conversation title from the DOM **before** cleanup runs.
+
+    Tries multiple strategies (most specific first):
+      1. First user message text (the actual question that started the chat)
+      2. ``<title>`` tag content (with platform-name stripping)
+      3. ``<h1>`` that is NOT a platform name
+      4. ``og:title`` / ``twitter:title`` meta tags
+    """
+    # ── Strategy 1: First user message ─────────────
+    # Most platforms mark user turns with data attributes or known classes.
+    for attr, val in (
+        ("data-message-author-role", "user"),
+        ("data-turn-role", "human"),
+        ("data-role", "user"),
+    ):
+        first_user = soup.find(attrs={attr: val})
+        if first_user:
+            text = first_user.get_text(" ", strip=True)
+            # Truncate to first sentence / 120 chars for a reasonable title
+            text = re.split(r"[.?!\n]", text)[0].strip()
+            if len(text) > 120:
+                text = text[:117].rsplit(" ", 1)[0] + "…"
+            if text and text.lower() not in _PLATFORM_NAME_SET:
+                return text
+
+    # ── Strategy 2: <title> tag ────────────────────
+    title_tag = soup.find("title")
+    if title_tag:
+        result = _clean_raw_title(title_tag.get_text(strip=True))
+        if result:
+            return result
+
+    # ── Strategy 3: First <h1> that isn't branding ─
+    for h1 in soup.find_all("h1", limit=3):
+        h1_text = h1.get_text(strip=True)
+        result = _clean_raw_title(h1_text)
+        if result:
+            return result
+
+    # ── Strategy 4: Open Graph / Twitter meta ──────
+    for attr_name in ("og:title", "twitter:title"):
+        meta = soup.find("meta", attrs={"property": attr_name}) or soup.find(
+            "meta", attrs={"name": attr_name}
+        )
+        if meta and meta.get("content"):
+            result = _clean_raw_title(meta["content"])
+            if result:
+                return result
+
+    return None
+
+
+# ──────────────────────────────────────────────
 #  Platform Artifact Cleanup
 # ──────────────────────────────────────────────
 
@@ -536,25 +618,7 @@ def extract_full_page(
     soup = BeautifulSoup(raw_html, "html.parser")
 
     # ── Phase 0: Extract conversation title before cleanup ──
-    chat_title: Optional[str] = None
-    title_tag = soup.find("title")
-    if title_tag:
-        raw_title = title_tag.get_text(strip=True)
-        # Strip platform names and "Conversation with ..." prefix
-        cleaned = raw_title
-        cleaned = re.sub(
-            r"(?i)^conversation\s+with\s+", "", cleaned
-        )
-        for name in _PLATFORM_NAMES:
-            cleaned = re.sub(
-                rf"(?i)\s*[-–—|]\s*{re.escape(name)}\s*$", "", cleaned
-            )
-            cleaned = re.sub(
-                rf"(?i)^{re.escape(name)}\s*[-–—|]\s*", "", cleaned
-            )
-        cleaned = cleaned.strip(" -–—|")
-        if cleaned:
-            chat_title = cleaned
+    chat_title: Optional[str] = _extract_chat_title(soup)
 
     # ── Phase 1: Basic tag cleanup ─────────────────
     for tag in soup(["button", "svg", "nav", "footer", "script", "style", "header"]):
