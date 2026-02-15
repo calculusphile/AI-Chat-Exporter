@@ -1,6 +1,6 @@
 # 📝 AI Chat Exporter
 
-> **v3.0.0** — Convert AI chat HTML exports into clean, tagged Markdown notes.
+> **v3.1.0** — Convert AI chat HTML exports into clean, tagged Markdown notes.
 
 A modern Python CLI tool that converts saved HTML chat logs from **ChatGPT, Gemini, Claude, Copilot, and DeepSeek** into structured Markdown files — ready for **Obsidian**, **Notion**, or any knowledge base.
 
@@ -11,9 +11,11 @@ A modern Python CLI tool that converts saved HTML chat logs from **ChatGPT, Gemi
 | Feature | Description |
 |---|---|
 | **Live Watch Mode** | Auto-detects new HTML files in your Downloads folder via `watchdog` |
+| **Full-Page Export** | Convert an entire HTML chat page to Markdown — no search needed |
 | **Batch Processing** | Process every HTML file in a directory at once |
 | **CLI + Interactive** | Full `argparse` CLI flags **or** guided interactive menu |
 | **Smart Extraction** | Finds specific AI responses by search phrase |
+| **AI Smart Titles** | Generates clean headings from verbose questions (AI or heuristic) |
 | **Session Merging** | Append multiple extractions into a single "Master Note" |
 | **15+ Language Detection** | Python, C++, JS, TS, Rust, Go, Java, SQL, Bash, Ruby, C#, Kotlin, Swift, and more |
 | **3-Tier Detection** | HTML class → proximity search → syntax analysis |
@@ -50,11 +52,20 @@ python watcher.py --watch
 # Process a single file
 python watcher.py --file "path/to/chat.html"
 
+# Full-page export (entire HTML → Markdown)
+python watcher.py --file "chat.html" --full-page
+
+# Full-page batch (all HTML files in a folder)
+python watcher.py --batch "path/to/folder" --full-page
+
 # Batch process a folder
 python watcher.py --batch "path/to/folder"
 
 # Merge all extractions into one file
 python watcher.py --file "chat.html" --merge "StudyNotes.md"
+
+# Combine full-page + merge
+python watcher.py --batch "chats/" --full-page --merge "AllNotes.md"
 
 # Debug logging
 python watcher.py --watch --debug
@@ -70,6 +81,7 @@ python watcher.py --watch --debug
 | `--watch` | `-w` | Start live-watch mode on Downloads folder |
 | `--file PATH` | `-f` | Process a single HTML file |
 | `--batch PATH` | `-b` | Process all HTML files in a directory |
+| `--full-page` | `-p` | Export entire page instead of searching for phrases |
 | `--merge NAME` | `-m` | Merge all extractions into one `.md` file |
 | `--downloads PATH` | | Override the watched Downloads directory |
 | `--debug` | | Enable verbose debug logging |
@@ -85,14 +97,21 @@ Edit `config.json` to customise behaviour:
     "default_save_folder": "Exported_Notes",
     "downloads_path": "",
     "supported_platforms": ["ChatGPT", "Gemini", "Claude", "Copilot", "DeepSeek"],
-    "version": "3.0.0",
+    "version": "3.1.0",
     "settings": {
         "strip_buttons": true,
         "include_metadata": true,
         "date_format": "%Y-%m-%d",
         "heading_style": "ATX",
         "wrap_code_blocks": true,
-        "max_filename_length": 50
+        "max_filename_length": 50,
+        "smart_titles": true
+    },
+    "ai": {
+        "enabled": false,
+        "api_key": "",
+        "api_base": "https://api.openai.com/v1",
+        "model": "gpt-4o-mini"
     }
 }
 ```
@@ -106,8 +125,14 @@ Edit `config.json` to customise behaviour:
 | `date_format` | `%Y-%m-%d` | Date format in frontmatter |
 | `heading_style` | `ATX` | Markdown heading style (`ATX` = `#`, `SETEXT` = underlines) |
 | `max_filename_length` | `50` | Max characters for auto-generated filenames |
+| `smart_titles` | `true` | Auto-clean verbose questions into concise headings |
+| `ai.enabled` | `false` | Enable AI-powered title generation |
+| `ai.api_key` | `""` | Your OpenAI (or compatible) API key |
+| `ai.api_base` | `https://api.openai.com/v1` | API endpoint (supports OpenAI, Azure, local LLMs) |
+| `ai.model` | `gpt-4o-mini` | Model to use for title generation |
 
-> **Tip:** Leave `downloads_path` empty to auto-detect your system's Downloads folder.
+> **Tip:** Leave `downloads_path` empty to auto-detect your system's Downloads folder.  
+> **Tip:** Smart titles work without AI — the heuristic mode cleans up filler words and applies title case locally. Set `ai.enabled: true` and add your API key for even better titles.
 
 ---
 
@@ -118,6 +143,7 @@ AI_Chat_Exporter/
 ├── watcher.py            # CLI entry point + file watcher
 ├── converter.py          # HTML → Markdown conversion engine
 ├── config_loader.py      # Typed config management
+├── title_generator.py    # AI + heuristic smart title generation
 ├── logger.py             # Centralised logging
 ├── config.json           # User settings
 ├── requirements.txt      # Dependencies
@@ -135,8 +161,8 @@ AI_Chat_Exporter/
 
 1. **Input** — Save any AI chat page as `.html` (Ctrl+S in browser)
 2. **Detection** — The watcher picks it up, or you pass it via `--file`
-3. **Search** — You enter a phrase from the conversation
-4. **Extraction** — BeautifulSoup locates the user message → walks the DOM to the AI response
+3. **Mode** — Choose between **search-based extraction** or **full-page export**
+4. **Smart Titles** — Verbose questions are auto-cleaned into concise headings (AI or heuristic)
 5. **Language Detection** — Code blocks are analyzed with a 3-tier strategy:
    - HTML class attributes (`language-python`)
    - Proximity search (nearest text label above the block)

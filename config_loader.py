@@ -19,6 +19,15 @@ CONFIG_PATH = Path(__file__).parent / "config.json"
 
 
 @dataclass
+class AISettings:
+    """Settings for AI-powered title generation."""
+    enabled: bool = False
+    api_key: str = ""
+    api_base: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o-mini"
+
+
+@dataclass
 class ExporterSettings:
     """Individual export settings."""
     strip_buttons: bool = True
@@ -27,6 +36,7 @@ class ExporterSettings:
     heading_style: str = "ATX"
     wrap_code_blocks: bool = True
     max_filename_length: int = 50
+    smart_titles: bool = True
 
 
 @dataclass
@@ -38,6 +48,7 @@ class AppConfig:
         default_factory=lambda: ["ChatGPT", "Gemini", "Claude", "Copilot", "DeepSeek"]
     )
     settings: ExporterSettings = field(default_factory=ExporterSettings)
+    ai: AISettings = field(default_factory=AISettings)
     version: str = "3.0.0"
 
     @property
@@ -77,6 +88,14 @@ def load_config(config_path: Optional[Path] = None) -> AppConfig:
             heading_style=settings_raw.get("heading_style", "ATX"),
             wrap_code_blocks=settings_raw.get("wrap_code_blocks", True),
             max_filename_length=settings_raw.get("max_filename_length", 50),
+            smart_titles=settings_raw.get("smart_titles", True),
+        )
+        ai_raw = raw.get("ai", {})
+        ai = AISettings(
+            enabled=ai_raw.get("enabled", False),
+            api_key=ai_raw.get("api_key", ""),
+            api_base=ai_raw.get("api_base", "https://api.openai.com/v1"),
+            model=ai_raw.get("model", "gpt-4o-mini"),
         )
         config = AppConfig(
             default_save_folder=raw.get("default_save_folder", "Exported_Notes"),
@@ -86,6 +105,7 @@ def load_config(config_path: Optional[Path] = None) -> AppConfig:
                 ["ChatGPT", "Gemini", "Claude", "Copilot", "DeepSeek"],
             ),
             settings=settings,
+            ai=ai,
             version=raw.get("version", "3.0.0"),
         )
         logger.info("Config loaded from %s", path)

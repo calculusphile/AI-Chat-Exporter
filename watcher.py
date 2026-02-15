@@ -1,11 +1,13 @@
 """
 AI Chat Exporter — Watcher & CLI Interface.
 
-Provides two operating modes:
+Provides four operating modes:
   1. Live Watch  — monitors Downloads folder for new HTML files
   2. Manual      — processes a single file on demand
   3. Batch       — processes all HTML files in a directory
+  4. Full Page   — converts entire HTML chat pages to Markdown
 
+Supports AI-powered smart titles for cleaner headings.
 Uses argparse for CLI flags so the tool can be scripted or run
 interactively with a rich terminal UI.
 """
@@ -25,7 +27,8 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 from config_loader import AppConfig, load_config
-from converter import ExtractionResult, extract_response, save_to_file
+from converter import ExtractionResult, extract_response, extract_full_page, save_to_file
+from title_generator import generate_smart_title
 from logger import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -90,6 +93,21 @@ def _sanitize_filename(name: str, max_len: int = 50) -> str:
     return safe[:max_len] + ".md"
 
 
+def _get_smart_title(phrase: str, config: AppConfig) -> str:
+    """Generate a smart title using AI or heuristic fallback."""
+    if not config.settings.smart_titles:
+        return phrase
+
+    api_key = config.ai.api_key if config.ai.enabled else None
+    return generate_smart_title(
+        phrase,
+        api_key=api_key,
+        api_base=config.ai.api_base,
+        model=config.ai.model,
+        max_length=config.settings.max_filename_length,
+    )
+
+
 def process_file(
     file_path: Path,
     *,
@@ -126,15 +144,19 @@ def process_file(
         result: ExtractionResult = extract_response(file_path, phrase, config=config)
 
         if result.success and result.markdown:
+            title = _get_smart_title(phrase, config)
+            if title != phrase:
+                print(f"    {_Style.DIM}Title: {title}{_Style.RESET}")
+
             if merge_target:
                 saved = save_to_file(
-                    result.markdown, merge_target, phrase, mode="a", config=config
+                    result.markdown, merge_target, title, mode="a", config=config
                 )
                 print(_Style.ok(f"Appended to {merge_target}  ({result.word_count} words)"))
             else:
-                fname = _sanitize_filename(phrase, config.settings.max_filename_length)
+                fname = _sanitize_filename(title, config.settings.max_filename_length)
                 saved = save_to_file(
-                    result.markdown, fname, phrase, mode="w", config=config
+                    result.markdown, fname, title, mode="w", config=config
                 )
                 print(_Style.ok(f"Saved → {fname}  ({result.word_count} words)"))
 
@@ -163,6 +185,83 @@ def batch_process(
     print(_Style.info(f"Found {len(html_files)} HTML file(s) in {directory}"))
     for f in html_files:
         process_file(f, merge_target=merge_target, config=config)
+
+
+# ──────────────────────────────────────────────
+#  Full-Page Processing
+# ──────────────────────────────────────────────
+
+def process_full_page(
+    file_path: Path,
+    *,
+    merge_target: Optional[str] = None,
+    config: AppConfig,
+) -> int:
+    """
+    Convert an entire HTML chat page to Markdown (no search phrase needed).
+
+    Args:
+        file_path: Path to the HTML file.
+        merge_target: Filename to append to (or None for auto-naming).
+        config: Application configuration.
+
+    Returns:
+        1 if successful, 0 otherwise.
+    """
+    print(f"\n{_Style.info(f'Full-page export: {file_path.name}')}")
+
+    if not file_path.exists():
+        print(_Style.err("File not found."))
+        return 0
+
+    result: ExtractionResult = extract_full_page(file_path, config=config)
+
+    if result.success and result.markdown:
+        # Use the filename (without extension) as the base title
+        raw_title = file_path.stem.replace("_", " ").replace("-", " ")
+        title = _get_smart_title(raw_title, config)
+
+        if title != raw_title:
+            print(f"    {_Style.DIM}Title: {title}{_Style.RESET}")
+
+        if merge_target:
+            saved = save_to_file(
+                result.markdown, merge_target, title, mode="a", config=config
+            )
+            print(_Style.ok(f"Appended to {merge_target}  ({result.word_count} words)"))
+        else:
+            fname = _sanitize_filename(title, config.settings.max_filename_length)
+            saved = save_to_file(
+                result.markdown, fname, title, mode="w", config=config
+            )
+            print(_Style.ok(f"Saved → {fname}  ({result.word_count} words)"))
+
+        if result.detected_languages:
+            langs = ", ".join(result.detected_languages)
+            print(f"    {_Style.DIM}Languages detected: {langs}{_Style.RESET}")
+        return 1
+    else:
+        print(_Style.warn(result.message))
+        return 0
+
+
+def batch_full_page(
+    directory: Path,
+    *,
+    merge_target: Optional[str] = None,
+    config: AppConfig,
+) -> None:
+    """Full-page export every HTML/HTM file in a directory."""
+    html_files = sorted(directory.glob("*.htm*"))
+    if not html_files:
+        print(_Style.warn(f"No HTML files found in {directory}"))
+        return
+
+    print(_Style.info(f"Full-page export: {len(html_files)} file(s) in {directory}"))
+    total = 0
+    for f in html_files:
+        total += process_full_page(f, merge_target=merge_target, config=config)
+    print(f"\n{_Style.ok(f'Batch complete — {total}/{len(html_files)} file(s) exported.')}")
 
 
 # ──────────────────────────────────────────────
@@ -242,6 +341,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to a folder — process all HTML files inside.",
     )
     parser.add_argument(
+        "-p", "--full-page",
+        action="store_true",
+        help="Export entire HTML page(s) instead of searching for specific phrases.",
+    )
+    parser.add_argument(
         "-m", "--merge",
         type=str,
         default=None,
@@ -280,10 +384,12 @@ def interactive_menu(config: AppConfig) -> None:
     # Mode selection
     print(f"\n  {_Style.BOLD}Select mode:{_Style.RESET}")
     print(f"  {_Style.CYAN}1{_Style.RESET}  Live Watch  (auto-detect new HTML files)")
-    print(f"  {_Style.CYAN}2{_Style.RESET}  Manual      (process a specific file)")
+    print(f"  {_Style.CYAN}2{_Style.RESET}  Manual      (search & extract from a file)")
     print(f"  {_Style.CYAN}3{_Style.RESET}  Batch       (process all HTML files in a folder)")
+    print(f"  {_Style.CYAN}4{_Style.RESET}  Full Page   (convert entire HTML page to Markdown)")
+    print(f"  {_Style.CYAN}5{_Style.RESET}  Full Batch  (full-page export all HTML in a folder)")
 
-    choice = input(f"\n  {_Style.CYAN}▸ Choice [1/2/3]: {_Style.RESET}").strip()
+    choice = input(f"\n  {_Style.CYAN}▸ Choice [1/2/3/4/5]: {_Style.RESET}").strip()
 
     if choice == "1":
         start_watcher(config.downloads_dir, merge_target=merge_target, config=config)
@@ -299,6 +405,18 @@ def interactive_menu(config: AppConfig) -> None:
         raw = input("  Folder path (ENTER for Downloads): ").strip()
         folder = Path(raw) if raw else config.downloads_dir
         batch_process(folder, merge_target=merge_target, config=config)
+
+    elif choice == "4":
+        raw = input("  HTML file path (or filename in Downloads): ").strip()
+        path = Path(raw)
+        if not path.is_absolute():
+            path = config.downloads_dir / raw
+        process_full_page(path, merge_target=merge_target, config=config)
+
+    elif choice == "5":
+        raw = input("  Folder path (ENTER for Downloads): ").strip()
+        folder = Path(raw) if raw else config.downloads_dir
+        batch_full_page(folder, merge_target=merge_target, config=config)
 
     else:
         print(_Style.err("Invalid choice."))
@@ -327,7 +445,11 @@ def main() -> None:
         merge_target = args.merge if args.merge.endswith(".md") else args.merge + ".md"
 
     # Dispatch
-    if args.file:
+    if args.file and args.full_page:
+        process_full_page(Path(args.file), merge_target=merge_target, config=config)
+    elif args.batch and args.full_page:
+        batch_full_page(Path(args.batch), merge_target=merge_target, config=config)
+    elif args.file:
         process_file(Path(args.file), merge_target=merge_target, config=config)
     elif args.batch:
         batch_process(Path(args.batch), merge_target=merge_target, config=config)

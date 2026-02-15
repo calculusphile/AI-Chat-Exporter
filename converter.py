@@ -353,6 +353,88 @@ def extract_response(
 
 
 # ──────────────────────────────────────────────
+#  Full-Page Export
+# ──────────────────────────────────────────────
+
+def extract_full_page(
+    file_path: Path | str,
+    *,
+    config: Optional[AppConfig] = None,
+) -> ExtractionResult:
+    """
+    Convert an entire HTML chat page to Markdown.
+
+    Unlike ``extract_response``, this does NOT search for a specific phrase.
+    It converts the whole page, preserving all Q&A pairs.
+
+    Args:
+        file_path: Path to the HTML file.
+        config: Optional AppConfig.
+
+    Returns:
+        ExtractionResult with the full-page markdown.
+    """
+    cfg = config or load_config()
+    path = Path(file_path)
+
+    if not path.exists():
+        return ExtractionResult(success=False, message="File not found.")
+
+    try:
+        raw_html = _load_html(path)
+    except UnicodeDecodeError:
+        logger.error("Encoding error reading %s", path)
+        return ExtractionResult(success=False, message="Failed to read file — encoding issue.")
+
+    soup = BeautifulSoup(raw_html, "html.parser")
+
+    # Remove non-content elements
+    for tag in soup(["button", "svg", "nav", "footer", "script", "style", "header"]):
+        tag.decompose()
+
+    if cfg.settings.strip_buttons:
+        for tag in soup.select("div[class*='toolbar'], a[class*='copy']"):
+            tag.decompose()
+
+    # Try to find the main chat container
+    main_content = (
+        soup.find("main")
+        or soup.find("div", role="main")
+        or soup.find("article")
+        or soup.body
+        or soup
+    )
+
+    heading_style = cfg.settings.heading_style
+    markdown_text: str = md(
+        str(main_content),
+        heading_style=heading_style,
+        code_language_callback=get_code_language,
+    )
+
+    # Post-process
+    markdown_text = re.sub(r"\n{4,}", "\n\n\n", markdown_text)
+
+    detected = _auto_detect_tags(markdown_text)
+    word_count = len(markdown_text.split())
+
+    logger.info(
+        "Full-page export: %d words from '%s' (languages: %s)",
+        word_count,
+        path.name,
+        ", ".join(detected) or "none",
+    )
+
+    return ExtractionResult(
+        success=True,
+        markdown=markdown_text,
+        message="Full-page export successful.",
+        word_count=word_count,
+        detected_languages=detected,
+    )
+
+
+# ──────────────────────────────────────────────
 #  File I/O
 # ──────────────────────────────────────────────
 

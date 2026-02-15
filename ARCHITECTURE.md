@@ -1,6 +1,6 @@
 # 🏗️ Architecture Guide — AI Chat Exporter
 
-> **Version 3.0.0** — Last updated 2026-02-15
+> **Version 3.1.0** — Last updated 2026-02-15
 
 This document describes the internal architecture, module responsibilities, data flow, and the **change-impact map** so developers know exactly which files are affected when they modify something.
 
@@ -12,6 +12,7 @@ This document describes the internal architecture, module responsibilities, data
 AI_Chat_Exporter/
 ├── watcher.py            # CLI entry point + file watcher
 ├── converter.py          # HTML → Markdown conversion engine
+├── title_generator.py    # AI + heuristic smart title generation
 ├── config_loader.py      # Typed config loading (config.json → dataclass)
 ├── logger.py             # Centralised logging setup
 ├── config.json           # User-editable settings
@@ -36,8 +37,15 @@ AI_Chat_Exporter/
 ┌──────────────────┐     loads      ┌─────────────────┐
 │   watcher.py     │ ◄──────────── │  config_loader   │
 │  (CLI / Watcher) │               │  (config.json)   │
-└──────┬───────────┘               └─────────────────┘
-       │ calls extract_response()
+└───┬──────┬────────┘               └─────────────────┘
+       │      │
+       │      │ calls generate_smart_title()
+       │      ▼
+       │  ┌──────────────────┐
+       │  │ title_generator  │  ← heuristic cleanup OR AI API call
+       │  └──────────────────┘
+       │
+       │ calls extract_response() or extract_full_page()
        ▼
 ┌──────────────────┐
 │  converter.py    │
@@ -48,7 +56,7 @@ AI_Chat_Exporter/
 │  │ Frontmatter│  │  ← YAML metadata for Obsidian
 │  │ Generator  │  │
 │  ├────────────┤  │
-│  │ Extractor  │  │  ← finds AI response in DOM
+│  │ Extractor  │  │  ← phrase-search OR full-page
 │  └────────────┘  │
 └──────┬───────────┘
        │ returns ExtractionResult
@@ -65,10 +73,12 @@ AI_Chat_Exporter/
 ### `watcher.py` — CLI & Orchestration
 | Responsibility | Details |
 |---|---|
-| CLI argument parsing | `argparse` with `--watch`, `--file`, `--batch`, `--merge`, `--debug` flags |
-| Interactive menu | Fallback when no CLI args provided |
+| CLI argument parsing | `argparse` with `--watch`, `--file`, `--batch`, `--full-page`, `--merge`, `--debug` flags |
+| Interactive menu | Fallback when no CLI args provided (5 modes) |
 | Live file watching | `watchdog` observer on Downloads folder |
 | Batch processing | Glob all `*.htm*` files in a directory |
+| Full-page export | Convert entire HTML page without search phrases |
+| Smart title integration | Calls `title_generator` for clean headings |
 | Terminal UI | ANSI-colored output via `_Style` helper class |
 
 ### `converter.py` — Conversion Engine
@@ -76,11 +86,20 @@ AI_Chat_Exporter/
 |---|---|
 | HTML loading | `pathlib`-based UTF-8 file read |
 | DOM extraction | BeautifulSoup — locates user message → walks to AI response |
+| Full-page export | `extract_full_page()` — converts entire HTML body to Markdown |
 | Language detection | 3-tier strategy: HTML class → proximity search → syntax analysis |
 | Auto-tagging | Scans markdown for code patterns → generates tag list |
 | Frontmatter | YAML block with title, date, tags, source |
 | File saving | Write/append modes with frontmatter management |
 | `ExtractionResult` | Dataclass return type with `success`, `markdown`, `word_count`, `detected_languages` |
+
+### `title_generator.py` — Smart Title Generation
+| Responsibility | Details |
+|---|---|
+| Heuristic cleanup | Strips filler words, applies title case, truncates at word boundary |
+| AI-powered titles | Calls OpenAI-compatible API (configurable endpoint + model) |
+| Graceful fallback | If AI fails or no API key → heuristic is used automatically |
+| Zero dependencies | Uses only `urllib` (stdlib) for HTTP — no `requests` needed |
 
 ### `config_loader.py` — Configuration
 | Responsibility | Details |
@@ -105,11 +124,16 @@ AI_Chat_Exporter/
 watcher.py
   ├── converter.py
   │     └── config_loader.py
+  ├── title_generator.py
+  │     └── (stdlib: urllib)
   ├── config_loader.py
   └── logger.py
 
 converter.py
   └── config_loader.py
+
+title_generator.py
+  └── (stdlib only)
 
 config_loader.py
   └── (stdlib only)
@@ -132,7 +156,8 @@ This table helps developers understand cascading effects.
 | **`config_loader.py` → `AppConfig` fields** | `converter.py` and `watcher.py` consume the config | Any new setting needs to be wired into the relevant consumer |
 | **`config_loader.py` → `ExporterSettings` fields** | `converter.py` uses these in `save_to_file()` and `generate_frontmatter()` | Add matching key in `config.json` and default in dataclass |
 | **`converter.py` → `extract_response()` signature** | `watcher.py` calls this function | Update all call sites in `process_file()` |
-| **`converter.py` → `ExtractionResult` fields** | `watcher.py` reads `.success`, `.markdown`, `.word_count`, `.detected_languages`, `.message` | If field renamed/removed → update `process_file()` |
+| **`converter.py` → `extract_full_page()` signature** | `watcher.py` calls this function | Update `process_full_page()` and `batch_full_page()` |
+| **`converter.py` → `ExtractionResult` fields** | `watcher.py` reads `.success`, `.markdown`, `.word_count`, `.detected_languages`, `.message` | If field renamed/removed → update `process_file()` and `process_full_page()` |
 | **`converter.py` → `save_to_file()` signature** | `watcher.py` calls this function | Update `process_file()` call sites |
 | **`converter.py` → `_LABEL_MAP` / `_CODE_BLOCK_TAG_MAP`** | Only internal to `converter.py` | Adding a new language here auto-enables detection + tagging |
 | **`converter.py` → `generate_frontmatter()`** | Called by `save_to_file()` internally | Changes affect all exported `.md` files |
@@ -140,6 +165,11 @@ This table helps developers understand cascading effects.
 | **`watcher.py` → `_build_parser()`** | Only affects CLI interface | No cascading impact on other modules |
 | **`watcher.py` → `interactive_menu()`** | Only affects interactive mode | No cascading impact |
 | **`watcher.py` → `process_file()`** | Core orchestration loop | Changes here affect all 3 modes (watch, manual, batch) |
+| **`watcher.py` → `process_full_page()`** | Full-page orchestration | Changes affect full-page and full-batch modes |
+| **`title_generator.py` → `generate_smart_title()`** | `watcher.py` calls this for heading cleanup | If signature changes → update `_get_smart_title()` in watcher |
+| **`title_generator.py` → heuristic logic** | Only internal | Changes affect all title output (filler words, casing) |
+| **`title_generator.py` → AI API call** | Only internal | Needs `ai.enabled` + `ai.api_key` in config |
+| **`config_loader.py` → `AISettings` fields** | `watcher.py` reads `config.ai.*` | Add matching key in `config.json` `ai` section |
 | **`logger.py`** | All modules import `logging` | Changing format/level affects all log output |
 | **`requirements.txt`** | `pip install` | Version bumps may introduce breaking changes in `beautifulsoup4`, `markdownify`, `watchdog` |
 
@@ -205,6 +235,9 @@ To add support for a new programming language (e.g., **Scala**):
 | **ANSI colors without `rich`** | Zero extra dependencies for terminal styling |
 | **Separate `config_loader`** | Single responsibility; testable in isolation |
 | **`logging` over `print`** | Levelled output, file logging, structured messages |
+| **Heuristic-first titles** | Works offline with zero config; AI is opt-in |
+| **`urllib` over `requests`** | Zero external deps for AI API; stdlib is sufficient |
+| **Full-page as separate fn** | `extract_full_page()` shares cleanup/conversion code but has distinct DOM strategy |
 
 ---
 
