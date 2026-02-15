@@ -2,7 +2,7 @@
     "default_save_folder": "Exported_Notes",
     "downloads_path": "",
     "supported_platforms": ["ChatGPT", "Gemini", "Claude", "Copilot", "DeepSeek"],
-    "version": "3.1.0",
+    "version": "3.2.0",
     "settings": {
         "strip_buttons": true,
         "include_metadata": true,

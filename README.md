@@ -12,6 +12,8 @@ A modern Python CLI tool that converts saved HTML chat logs from **ChatGPT, Gemi
 |---|---|
 | **Live Watch Mode** | Auto-detects new HTML files in your Downloads folder via `watchdog` |
 | **Full-Page Export** | Convert an entire HTML chat page to Markdown — no search needed |
+| **Platform Cleanup** | Auto-strips sidebars, branding ("Google Gemini"), overlays, and input areas |
+| **User-Code Dedup** | Removes code blocks from user messages so only the AI's code appears |
 | **Batch Processing** | Process every HTML file in a directory at once |
 | **CLI + Interactive** | Full `argparse` CLI flags **or** guided interactive menu |
 | **Smart Extraction** | Finds specific AI responses by search phrase |

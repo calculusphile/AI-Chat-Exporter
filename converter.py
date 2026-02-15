@@ -17,12 +17,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag
 from markdownify import markdownify as md
 
 from config_loader import AppConfig, load_config
 
 logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────
+#  Platform Branding Names
+# ──────────────────────────────────────────────
+
+_PLATFORM_NAMES: list[str] = [
+    "Google Gemini", "Gemini", "ChatGPT", "GPT-4o", "GPT-4",
+    "Claude", "Copilot", "Perplexity", "DeepSeek",
+]
 
 # ──────────────────────────────────────────────
 #  Language Detection Maps
@@ -249,6 +258,143 @@ def get_code_language(el: Tag) -> str:
 
 
 # ──────────────────────────────────────────────
+#  Platform Artifact Cleanup
+# ──────────────────────────────────────────────
+
+# Regex for sidebar / drawer / nav-panel class names
+_SIDEBAR_CLASS_RE = re.compile(
+    r"sidebar|side-bar|sidenav|side.nav|drawer|nav[-_]?rail|"
+    r"chat[-_]?list|conversation[-_]?list|history[-_]?panel|"
+    r"left[-_]?panel|left[-_]?nav|menu[-_]?panel|"
+    r"threads[-_]?list|thread[-_]?list",
+    re.IGNORECASE,
+)
+
+# Regex for aria-labels that reveal sidebar / navigation
+_SIDEBAR_ARIA_RE = re.compile(
+    r"conversation|recent chat|chat history|sidebar|navigation|"
+    r"threads|previous chat|menu",
+    re.IGNORECASE,
+)
+
+# Regex for overlay / popup class names
+_OVERLAY_CLASS_RE = re.compile(
+    r"tooltip|popover|modal|overlay|backdrop|snackbar",
+    re.IGNORECASE,
+)
+
+# Regex for user-message class names
+_USER_MSG_CLASS_RE = re.compile(
+    r"user[-_]?message|human[-_]?message|query[-_]?message|"
+    r"user[-_]?turn|human[-_]?turn|request[-_]?row|"
+    r"user[-_]?row|prompt[-_]?row",
+    re.IGNORECASE,
+)
+
+
+def _strip_platform_artifacts(soup: BeautifulSoup) -> None:
+    """
+    Remove platform-specific UI chrome from the DOM before Markdown
+    conversion.
+
+    Targets:
+      • Sidebar / drawer / navigation panels (old-chat lists)
+      • Platform branding headers ("Google Gemini", "ChatGPT", …)
+      • Input areas, tooltips, modals
+      • Common UI detritus that leaks into exports
+    """
+    # ── 1. Sidebar & navigation panels ──────────────
+    for tag in soup(["aside"]):
+        tag.decompose()
+
+    for role in ("complementary", "navigation"):
+        for el in soup.find_all(attrs={"role": role}):
+            el.decompose()
+
+    for el in soup.find_all(class_=_SIDEBAR_CLASS_RE):
+        el.decompose()
+
+    for el in soup.find_all(attrs={"aria-label": _SIDEBAR_ARIA_RE}):
+        el.decompose()
+
+    # ── 2. Platform branding ───────────────────────
+    # <title> tags bleed into markdown as text
+    for t in soup(["title"]):
+        t.decompose()
+
+    # Standalone text nodes that are JUST a platform name
+    for name in _PLATFORM_NAMES:
+        pattern = re.compile(rf"^\s*{re.escape(name)}\s*$", re.IGNORECASE)
+        for text_node in soup.find_all(string=pattern):
+            parent = text_node.parent
+            if parent is None:
+                continue
+            if parent.name in {
+                "h1", "h2", "h3", "h4", "h5", "h6",
+                "span", "div", "a", "p", "label",
+            }:
+                parent_text = parent.get_text(strip=True).lower()
+                if parent_text in (name.lower(), f"✨ {name.lower()}"):
+                    parent.decompose()
+
+    # ── 3. Input / prompt areas ────────────────────
+    for el in soup.find_all(attrs={"contenteditable": "true"}):
+        el.decompose()
+    for el in soup.find_all(["textarea", "input"]):
+        el.decompose()
+
+    # ── 4. Modals / tooltips / overlays ────────────
+    for role in ("dialog", "tooltip", "alertdialog"):
+        for el in soup.find_all(attrs={"role": role}):
+            el.decompose()
+
+    for el in soup.find_all(class_=_OVERLAY_CLASS_RE):
+        el.decompose()
+
+    logger.debug("Stripped platform artifacts from DOM")
+
+
+def _simplify_user_messages(soup: BeautifulSoup) -> None:
+    """
+    Locate user-message containers and strip large code blocks from
+    them.
+
+    In a full-page export the user's pasted code would otherwise
+    duplicate what the AI response already shows.  This keeps the
+    user's *question text* but drops their code pastes so only the
+    AI's formatted code appears.
+    """
+    user_containers: list[Tag] = []
+
+    # ── Data-attribute detection (most reliable) ───
+    for attr, val in (
+        ("data-message-author-role", "user"),
+        ("data-turn-role", "human"),
+        ("data-role", "user"),
+    ):
+        user_containers.extend(soup.find_all(attrs={attr: val}))
+
+    # ── Class-based detection ──────────────────────
+    user_containers.extend(soup.find_all(class_=_USER_MSG_CLASS_RE))
+
+    seen: set[int] = set()
+    removed = 0
+    for container in user_containers:
+        cid = id(container)
+        if cid in seen:
+            continue
+        seen.add(cid)
+
+        # Remove <pre> blocks (wrapped code) from user messages
+        for code_el in container.find_all("pre"):
+            code_el.decompose()
+            removed += 1
+
+    if removed:
+        logger.debug("Removed %d code block(s) from user messages", removed)
+
+
+# ──────────────────────────────────────────────
 #  Core Extraction Logic
 # ──────────────────────────────────────────────
 
@@ -388,7 +534,7 @@ def extract_full_page(
 
     soup = BeautifulSoup(raw_html, "html.parser")
 
-    # Remove non-content elements
+    # ── Phase 1: Basic tag cleanup ─────────────────
     for tag in soup(["button", "svg", "nav", "footer", "script", "style", "header"]):
         tag.decompose()
 
@@ -396,7 +542,18 @@ def extract_full_page(
         for tag in soup.select("div[class*='toolbar'], a[class*='copy']"):
             tag.decompose()
 
-    # Try to find the main chat container
+    # ── Phase 2: Platform-specific cleanup ─────────
+    #   • Strips sidebars / drawers (old chat lists)
+    #   • Strips platform branding ("Google Gemini", etc.)
+    #   • Strips input areas, overlays, modals
+    _strip_platform_artifacts(soup)
+
+    # ── Phase 3: Simplify user messages ────────────
+    #   Removes code blocks pasted by the user so only
+    #   the AI's formatted code appears in the export.
+    _simplify_user_messages(soup)
+
+    # ── Phase 4: Locate main content ───────────────
     main_content = (
         soup.find("main")
         or soup.find("div", role="main")
@@ -405,6 +562,7 @@ def extract_full_page(
         or soup
     )
 
+    # ── Phase 5: Convert to Markdown ───────────────
     heading_style = cfg.settings.heading_style
     markdown_text: str = md(
         str(main_content),
@@ -412,8 +570,16 @@ def extract_full_page(
         code_language_callback=get_code_language,
     )
 
-    # Post-process
+    # ── Phase 6: Post-process ──────────────────────
+    # Remove remaining platform name lines that survived DOM stripping
+    for name in _PLATFORM_NAMES:
+        markdown_text = re.sub(
+            rf"^#+\s*{re.escape(name)}\s*$", "", markdown_text, flags=re.MULTILINE
+        )
+    # Collapse excessive blank lines
     markdown_text = re.sub(r"\n{4,}", "\n\n\n", markdown_text)
+    # Strip leading blank lines
+    markdown_text = markdown_text.lstrip("\n")
 
     detected = _auto_detect_tags(markdown_text)
     word_count = len(markdown_text.split())

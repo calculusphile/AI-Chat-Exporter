@@ -86,12 +86,24 @@ AI_Chat_Exporter/
 |---|---|
 | HTML loading | `pathlib`-based UTF-8 file read |
 | DOM extraction | BeautifulSoup — locates user message → walks to AI response |
-| Full-page export | `extract_full_page()` — converts entire HTML body to Markdown |
+| Full-page export | `extract_full_page()` — 6-phase pipeline (see below) |
+| Platform cleanup | `_strip_platform_artifacts()` — strips sidebars, branding, overlays |
+| User-msg cleanup | `_simplify_user_messages()` — removes user-pasted code to avoid duplication |
 | Language detection | 3-tier strategy: HTML class → proximity search → syntax analysis |
 | Auto-tagging | Scans markdown for code patterns → generates tag list |
 | Frontmatter | YAML block with title, date, tags, source |
 | File saving | Write/append modes with frontmatter management |
 | `ExtractionResult` | Dataclass return type with `success`, `markdown`, `word_count`, `detected_languages` |
+
+#### Full-Page Export Pipeline
+```
+Phase 1  Basic tag cleanup      (button, svg, nav, footer, script, style, header)
+Phase 2  Platform artifacts     (sidebar, branding, input areas, modals)
+Phase 3  User-message cleanup   (strip code blocks from user messages)
+Phase 4  Locate main content    (main → div[role=main] → article → body)
+Phase 5  Markdown conversion    (markdownify + code language callback)
+Phase 6  Post-process           (strip remaining platform names, collapse blanks)
+```
 
 ### `title_generator.py` — Smart Title Generation
 | Responsibility | Details |
@@ -160,6 +172,9 @@ This table helps developers understand cascading effects.
 | **`converter.py` → `ExtractionResult` fields** | `watcher.py` reads `.success`, `.markdown`, `.word_count`, `.detected_languages`, `.message` | If field renamed/removed → update `process_file()` and `process_full_page()` |
 | **`converter.py` → `save_to_file()` signature** | `watcher.py` calls this function | Update `process_file()` call sites |
 | **`converter.py` → `_LABEL_MAP` / `_CODE_BLOCK_TAG_MAP`** | Only internal to `converter.py` | Adding a new language here auto-enables detection + tagging |
+| **`converter.py` → `_strip_platform_artifacts()`** | Called by `extract_full_page()` internally | Controls sidebar, branding, and UI cleanup; add new selectors here for new platforms |
+| **`converter.py` → `_simplify_user_messages()`** | Called by `extract_full_page()` internally | Controls user-code deduplication; add new data-attribute patterns for new platforms |
+| **`converter.py` → `_PLATFORM_NAMES`** | Used by both `_strip_platform_artifacts()` and post-process regex | Add new AI platform names here to auto-strip their branding |
 | **`converter.py` → `generate_frontmatter()`** | Called by `save_to_file()` internally | Changes affect all exported `.md` files |
 | **`converter.py` → `get_code_language()`** | Used as callback by `markdownify` | Changes affect code block language annotations in output |
 | **`watcher.py` → `_build_parser()`** | Only affects CLI interface | No cascading impact on other modules |
