@@ -406,6 +406,12 @@ def _extract_chat_title(soup: BeautifulSoup) -> Optional[str]:
 #  Platform Artifact Cleanup
 # ──────────────────────────────────────────────
 
+# Maximum text-length for an element to be treated as a sidebar.
+# Containers with more text are likely main-content wrappers that
+# happen to carry sidebar-like class names (e.g. Gemini's
+# <chat-app class="side-nav-open"> wraps the entire page).
+_SIDEBAR_MAX_TEXT = 5000
+
 # Regex for sidebar / drawer / nav-panel class names
 _SIDEBAR_CLASS_RE = re.compile(
     r"sidebar|side-bar|sidenav|side.nav|drawer|nav[-_]?rail|"
@@ -454,12 +460,18 @@ def _strip_platform_artifacts(soup: BeautifulSoup) -> None:
 
     for role in ("complementary", "navigation"):
         for el in soup.find_all(attrs={"role": role}):
+            if len(el.get_text(strip=True)) > _SIDEBAR_MAX_TEXT:
+                continue
             el.decompose()
 
     for el in soup.find_all(class_=_SIDEBAR_CLASS_RE):
+        if len(el.get_text(strip=True)) > _SIDEBAR_MAX_TEXT:
+            continue
         el.decompose()
 
     for el in soup.find_all(attrs={"aria-label": _SIDEBAR_ARIA_RE}):
+        if len(el.get_text(strip=True)) > _SIDEBAR_MAX_TEXT:
+            continue
         el.decompose()
 
     # ── 2. Platform branding ───────────────────────
@@ -702,8 +714,12 @@ def extract_full_page(
     _simplify_user_messages(soup)
 
     # ── Phase 4: Locate main content ───────────────
+    #   Try platform-specific containers first (more precise),
+    #   then fall back to generic semantic tags.
     main_content = (
-        soup.find("main")
+        soup.find("bard-sidenav-content")   # Gemini
+        or soup.find("chat-window-content")  # Gemini (alt)
+        or soup.find("main")
         or soup.find("div", role="main")
         or soup.find("article")
         or soup.body
