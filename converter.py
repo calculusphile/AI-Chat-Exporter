@@ -94,6 +94,7 @@ class ExtractionResult:
     message: str = ""
     word_count: int = 0
     detected_languages: List[str] = field(default_factory=list)
+    title: Optional[str] = None
 
 
 # ──────────────────────────────────────────────
@@ -534,6 +535,27 @@ def extract_full_page(
 
     soup = BeautifulSoup(raw_html, "html.parser")
 
+    # ── Phase 0: Extract conversation title before cleanup ──
+    chat_title: Optional[str] = None
+    title_tag = soup.find("title")
+    if title_tag:
+        raw_title = title_tag.get_text(strip=True)
+        # Strip platform names and "Conversation with ..." prefix
+        cleaned = raw_title
+        cleaned = re.sub(
+            r"(?i)^conversation\s+with\s+", "", cleaned
+        )
+        for name in _PLATFORM_NAMES:
+            cleaned = re.sub(
+                rf"(?i)\s*[-–—|]\s*{re.escape(name)}\s*$", "", cleaned
+            )
+            cleaned = re.sub(
+                rf"(?i)^{re.escape(name)}\s*[-–—|]\s*", "", cleaned
+            )
+        cleaned = cleaned.strip(" -–—|")
+        if cleaned:
+            chat_title = cleaned
+
     # ── Phase 1: Basic tag cleanup ─────────────────
     for tag in soup(["button", "svg", "nav", "footer", "script", "style", "header"]):
         tag.decompose()
@@ -576,6 +598,15 @@ def extract_full_page(
         markdown_text = re.sub(
             rf"^#+\s*{re.escape(name)}\s*$", "", markdown_text, flags=re.MULTILINE
         )
+    # Remove "Conversation with <AI>" headings and standalone lines
+    markdown_text = re.sub(
+        r"^#+\s*Conversation\s+with\s+\S+.*$", "", markdown_text,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    markdown_text = re.sub(
+        r"^Conversation\s+with\s+\S+.*$", "", markdown_text,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
     # Collapse excessive blank lines
     markdown_text = re.sub(r"\n{4,}", "\n\n\n", markdown_text)
     # Strip leading blank lines
@@ -597,6 +628,7 @@ def extract_full_page(
         message="Full-page export successful.",
         word_count=word_count,
         detected_languages=detected,
+        title=chat_title,
     )
 
 

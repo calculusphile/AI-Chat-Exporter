@@ -217,8 +217,8 @@ def process_full_page(
     result: ExtractionResult = extract_full_page(file_path, config=config)
 
     if result.success and result.markdown:
-        # Use the filename (without extension) as the base title
-        raw_title = file_path.stem.replace("_", " ").replace("-", " ")
+        # Prefer the conversation name extracted from HTML; fall back to filename
+        raw_title = result.title or file_path.stem.replace("_", " ").replace("-", " ")
         title = _get_smart_title(raw_title, config)
 
         if title != raw_title:
