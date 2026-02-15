@@ -1,6 +1,6 @@
 # 🏗️ Architecture Guide — AI Chat Exporter
 
-> **Version 3.1.0** — Last updated 2026-02-15
+> **Version 3.2.0** — Last updated 2026-02-15
 
 This document describes the internal architecture, module responsibilities, data flow, and the **change-impact map** so developers know exactly which files are affected when they modify something.
 
@@ -87,7 +87,9 @@ AI_Chat_Exporter/
 | HTML loading | `pathlib`-based UTF-8 file read |
 | DOM extraction | BeautifulSoup — locates user message → walks to AI response |
 | Full-page export | `extract_full_page()` — 6-phase pipeline (see below) |
-| Platform cleanup | `_strip_platform_artifacts()` — strips sidebars, branding, overlays |
+| Platform cleanup | `_strip_platform_artifacts()` — strips sidebars, branding, overlays (with text-length safety guard) |
+| Content-safe removal | `_SIDEBAR_MAX_TEXT` threshold prevents decomposing large content containers that carry sidebar-like class names |
+| Gemini DOM support | Phase 4 checks for Gemini-specific web components (`<bard-sidenav-content>`, `<chat-window-content>`) before generic fallbacks |
 | User-msg cleanup | `_simplify_user_messages()` — removes user-pasted code to avoid duplication |
 | Language detection | 3-tier strategy: HTML class → proximity search → syntax analysis |
 | Auto-tagging | Scans markdown for code patterns → generates tag list |
@@ -98,9 +100,9 @@ AI_Chat_Exporter/
 #### Full-Page Export Pipeline
 ```
 Phase 1  Basic tag cleanup      (button, svg, nav, footer, script, style, header)
-Phase 2  Platform artifacts     (sidebar, branding, input areas, modals)
+Phase 2  Platform artifacts     (sidebar, branding, input areas, modals — with text-length safety guard)
 Phase 3  User-message cleanup   (strip code blocks from user messages)
-Phase 4  Locate main content    (main → div[role=main] → article → body)
+Phase 4  Locate main content    (bard-sidenav-content → chat-window-content → main → div[role=main] → article → body)
 Phase 5  Markdown conversion    (markdownify + code language callback)
 Phase 6  Post-process           (strip remaining platform names, collapse blanks)
 ```
@@ -172,7 +174,8 @@ This table helps developers understand cascading effects.
 | **`converter.py` → `ExtractionResult` fields** | `watcher.py` reads `.success`, `.markdown`, `.word_count`, `.detected_languages`, `.message` | If field renamed/removed → update `process_file()` and `process_full_page()` |
 | **`converter.py` → `save_to_file()` signature** | `watcher.py` calls this function | Update `process_file()` call sites |
 | **`converter.py` → `_LABEL_MAP` / `_CODE_BLOCK_TAG_MAP`** | Only internal to `converter.py` | Adding a new language here auto-enables detection + tagging |
-| **`converter.py` → `_strip_platform_artifacts()`** | Called by `extract_full_page()` internally | Controls sidebar, branding, and UI cleanup; add new selectors here for new platforms |
+| **`converter.py` → `_strip_platform_artifacts()`** | Called by `extract_full_page()` internally | Controls sidebar, branding, and UI cleanup; elements exceeding `_SIDEBAR_MAX_TEXT` (5 000 chars) are skipped to protect content containers |
+| **`converter.py` → `_SIDEBAR_MAX_TEXT`** | Guards all cleanup loops in `_strip_platform_artifacts()` | Raise/lower to tune sensitivity; prevents Gemini's `<chat-app class="side-nav-open">` from being decomposed |
 | **`converter.py` → `_simplify_user_messages()`** | Called by `extract_full_page()` internally | Controls user-code deduplication; add new data-attribute patterns for new platforms |
 | **`converter.py` → `_PLATFORM_NAMES`** | Used by both `_strip_platform_artifacts()` and post-process regex | Add new AI platform names here to auto-strip their branding |
 | **`converter.py` → `generate_frontmatter()`** | Called by `save_to_file()` internally | Changes affect all exported `.md` files |

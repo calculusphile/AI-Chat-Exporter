@@ -1,6 +1,6 @@
 # 📝 AI Chat Exporter
 
-> **v3.1.0** — Convert AI chat HTML exports into clean, tagged Markdown notes.
+> **v3.2.0** — Convert AI chat HTML exports into clean, tagged Markdown notes.
 
 A modern Python CLI tool that converts saved HTML chat logs from **ChatGPT, Gemini, Claude, Copilot, and DeepSeek** into structured Markdown files — ready for **Obsidian**, **Notion**, or any knowledge base.
 
@@ -13,6 +13,8 @@ A modern Python CLI tool that converts saved HTML chat logs from **ChatGPT, Gemi
 | **Live Watch Mode** | Auto-detects new HTML files in your Downloads folder via `watchdog` |
 | **Full-Page Export** | Convert an entire HTML chat page to Markdown — no search needed |
 | **Platform Cleanup** | Auto-strips sidebars, branding ("Google Gemini"), overlays, and input areas |
+| **Content-Safe Cleanup** | Text-length guard prevents accidental removal of large content containers |
+| **Gemini DOM Support** | Handles Gemini's custom Angular web components (`<bard-sidenav-content>`, etc.) |
 | **User-Code Dedup** | Removes code blocks from user messages so only the AI's code appears |
 | **Batch Processing** | Process every HTML file in a directory at once |
 | **CLI + Interactive** | Full `argparse` CLI flags **or** guided interactive menu |
@@ -99,7 +101,7 @@ Edit `config.json` to customise behaviour:
     "default_save_folder": "Exported_Notes",
     "downloads_path": "",
     "supported_platforms": ["ChatGPT", "Gemini", "Claude", "Copilot", "DeepSeek"],
-    "version": "3.1.0",
+    "version": "3.2.0",
     "settings": {
         "strip_buttons": true,
         "include_metadata": true,
