@@ -272,9 +272,18 @@ _UI_LABEL_SET = {
     "home", "settings", "help", "feedback", "send a message",
 }
 
+# Sidebar metadata suffixes that get appended to chat names
+_SIDEBAR_SUFFIX_RE = re.compile(
+    r"\s*(?:Pinned(?:\s+Chat)?|Starred(?:\s+Chat)?|Archived(?:\s+Chat)?"
+    r"|Shared(?:\s+Chat)?|Draft|Today|Yesterday"
+    r"|Last\s+\d+\s+days|This\s+week|This\s+month"
+    r"|\d+\s+(?:hour|minute|day|week|month)s?\s+ago)\s*$",
+    re.IGNORECASE,
+)
+
 
 def _clean_raw_title(raw: str) -> Optional[str]:
-    """Strip platform names, separators, and prefixes from a raw title string."""
+    """Strip platform names, separators, suffixes and prefixes from a raw title string."""
     cleaned = raw.strip()
     # Remove "Conversation with …" prefix
     cleaned = re.sub(r"(?i)^conversation\s+with\s+", "", cleaned)
@@ -286,6 +295,8 @@ def _clean_raw_title(raw: str) -> Optional[str]:
         cleaned = re.sub(
             rf"(?i)^{re.escape(name)}\s*[-–—|:]\s*", "", cleaned
         )
+    # Remove sidebar metadata suffixes ("Pinned Chat", "Today", etc.)
+    cleaned = _SIDEBAR_SUFFIX_RE.sub("", cleaned)
     cleaned = cleaned.strip(" -–—|:")
     # If what remains is a platform name or generic UI label, discard
     lower = cleaned.lower()
